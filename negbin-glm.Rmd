@@ -35,14 +35,10 @@ model {
   y ~ neg_binomial_2_log(b0 + b1 * x, phi);
 }
 "
-write(model, file = "negbin-glm.stan")
+sm <- stan_model(model_code = model)
 ```
 
-```{r, cache=TRUE}
-sm <- stan_model("negbin-glm.stan")
-```
-
-Simulate data: 
+Simulate data:
 
 ```{r}
 set.seed(123)
@@ -57,10 +53,18 @@ plot(x, y)
 
 Fit the model:
 
-```{r, results='hide'}
-m <- sampling(sm, data = list(N = N, y = y, x = x - mean(x)),
-  pars = c("b0", "b1", "phi"),
-  iter = 500, chains = 4)
+```{r, results='hide', cache=TRUE}
+library(parallel)
+rng_seed  <- 1
+sflist <-
+  mclapply(1:4, mc.cores = 2,
+    function(i) sampling(sm,
+      data = list(N = N, y = y, x = x - mean(x)),
+      pars = c("b0", "b1", "phi"),
+      seed = rng_seed, iter = 300,
+      chains = 1, chain_id = i,
+      refresh = -1))
+m <- sflist2stanfit(sflist)
 ```
 
 ```{r}
@@ -96,4 +100,209 @@ plot(x, y)
 for(i in seq_along(e[[1]])) {
   lines(x, exp(e[[1]][i] + e[[2]][i] * (x - mean(x))), col = "#00000008")
 }
+```
+
+## Adding a multilevel intercept
+
+We'll start with a basic mixed effects model with a normal error distribution just to make sure we have this right.
+
+We'll simulate some data with levels `j` that vary with standard deviation `sigma_j`. The deviations will be called `b0_j`.
+
+```{r}
+set.seed(1)
+N <- 20
+sigma_j <- 0.6
+d <- data.frame(j = 1:20, jname = letters[1:20], 
+  b0_j = rnorm(20, 0, sigma_j))
+phi <- 1.1
+b0 <- 0
+b1 <- 0.2
+ar1 <- 0.7
+x <- seq_len(N)
+x_cent <- x - mean(x)
+dat <- list()
+for(j in d$j) {
+  dat[[j]] <- data.frame(j = j, jname = d$jname[j], x = x, 
+    x_cent = x_cent, y = rnorm(N, sd = phi, 
+      mean = b0 + d$b0_j[j] + x_cent * b1))
+}
+dat <- do.call("rbind", dat)
+library(ggplot2)
+ggplot(dat, aes(x_cent, y)) + geom_point() + facet_wrap(~jname)
+```
+
+Compile the model:
+
+```{r, results='hide', cache=TRUE}
+model <- "
+// with a multilevel intercept
+// using Matt trick
+data {
+  int<lower=1> N;    // rows of data
+  vector[N] x;       // predictor
+  vector[N] y; // response
+  int<lower=1> N_j;   // number of groups
+  int<lower=1,upper=N_j> j_id[N];  // group ids
+}
+parameters {
+  real<lower=0> phi;    // neg. binomial dispersion parameter
+  real b0;              // intercept
+  real b1;              // slope
+  real<lower=0> sigma_j; // group-level standard deviation
+  vector[N_j] e_b0_j;
+}
+transformed parameters {
+  vector[N] yhat;
+  vector[N_j] b0_j;     // group-level deviates
+
+  b0_j <- sigma_j * e_b0_j;    // Matt trick
+  for (i in 1:N) {
+    yhat[i] <- b0 + b0_j[j_id[i]] + b1 * x[i];
+  }
+}
+model {
+  e_b0_j ~ normal(0,1); // Matt trick
+
+  // priors:
+  phi ~ cauchy(0, 3);
+  b0 ~ normal(0, 5);
+  b1 ~ normal(0, 5);
+  sigma_j ~ cauchy(0, 2);
+
+  y ~ normal(yhat, phi);
+}
+"
+sm2 <- rstan::stan_model(model_code = model)
+```
+
+Fit the model:
+
+```{r, results='hide', cache=TRUE}
+library(parallel)
+rng_seed <- 123
+model_data <-  list(
+        N = nrow(dat),
+        y = dat$y,
+        x = dat$x_cent,
+        N_j = max(dat$j),
+        j_id = dat$j)
+sflist <-
+  mclapply(1:4, mc.cores = 2,
+    function(i) sampling(sm2,
+      data = model_data, pars = c("b0", "b1", "phi", "sigma_j", "b0_j"),
+      seed = rng_seed, iter = 200,
+      chains = 1, chain_id = i,
+      refresh = -1))
+m5 <- sflist2stanfit(sflist)
+```
+
+```{r, cache=TRUE}
+traceplot(m5, inc_warmup = FALSE, pars = c("b0", "b1", "phi", "sigma_j"))
+m5
+
+library(lme4)
+arm::display(lmer(y ~ x_cent + (1 | jname), data = dat))
+```
+
+Looks about right.
+
+## Now with a negative binomial response
+
+Simulate some data:
+
+```{r}
+set.seed(1)
+N <- 20
+sigma_j <- 0.6
+d <- data.frame(j = 1:20, jname = letters[1:20], 
+  b0_j = rnorm(20, 0, sigma_j))
+phi <- 1.1
+b0 <- 0
+b1 <- 0.2
+ar1 <- 0.7
+x <- seq_len(N)
+x_cent <- x - mean(x)
+dat <- list()
+for(j in d$j) {
+  dat[[j]] <- data.frame(j = j, jname = d$jname[j], 
+    x = x, x_cent = x_cent,
+  y = rnbinom(N, size = phi, 
+    mu = exp(b0 + d$b0_j[j] + x_cent * b1)))
+}
+dat <- do.call("rbind", dat)
+library(ggplot2)
+ggplot(dat, aes(x_cent, y)) + geom_point() + facet_wrap(~jname)
+```
+
+Compile the multilevel intercept negative binomial GLMM model:
+
+```{r, cache=TRUE, results='hide'}
+model <- "
+// with a multilevel intercept
+// using Matt trick
+data {
+  int<lower=1> N;    // rows of data
+  vector[N] x;       // predictor
+  int<lower=0> y[N]; // response
+  int<lower=1> N_j;   // number of groups
+  int<lower=1,upper=N_j> j_id[N];  // group ids
+}
+parameters {
+  real<lower=0> phi;    // neg. binomial dispersion parameter
+  real b0;              // intercept
+  real b1;              // slope
+  real<lower=0> sigma_j; // group-level standard deviation
+  vector[N_j] e_b0_j;
+}
+transformed parameters {
+  vector[N] eta;
+  vector[N_j] b0_j;     // group-level deviates
+
+  b0_j <- sigma_j * e_b0_j;    // Matt trick
+  for (i in 1:N) {
+    eta[i] <- b0 + b0_j[j_id[i]] + b1 * x[i];
+  }
+}
+model {
+  e_b0_j ~ normal(0,1); // Matt trick
+
+  // priors:
+  phi ~ cauchy(0, 3);
+  b0 ~ normal(0, 5);
+  b1 ~ normal(0, 5);
+  sigma_j ~ cauchy(0, 2);
+
+  y ~ neg_binomial_2_log(eta, phi);
+}
+"
+sm6 <- rstan::stan_model(model_code = model)
+```
+
+And fit the model:
+
+```{r stan-negbin-multi-int, results='hide', cache=TRUE}
+library(parallel)
+rng_seed <- 123
+model_data <-  list(
+        N = nrow(dat),
+        y = dat$y,
+        x = dat$x_cent,
+        N_j = max(dat$j),
+        j_id = dat$j)
+sflist2 <-
+  mclapply(1:4, mc.cores = 2,
+    function(i) sampling(sm6,
+      data = model_data, pars = c("b0", "b1", "phi", "sigma_j", "b0_j"),
+      seed = rng_seed, iter = 200,
+      chains = 1, chain_id = i,
+      refresh = -1))
+m6 <- sflist2stanfit(sflist2)
+```
+
+```{r}
+traceplot(m6, inc_warmup = FALSE, pars = c("b0", "b1", "phi", "sigma_j"))
+m6
+# library(glmmADMB)
+# m6.glmmadmb <- glmmadmb(y ~ x_cent + (1 | jname), data = dat, family = "nbinom1")
+# coef(m6.glmmadmb)
 ```
