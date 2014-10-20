@@ -1,0 +1,8 @@
+.Rapp.history
+negbin-glm.R
+negbin-glm.html
+negbin-glm.stan
+negbin-glm_cache/
+negbin-glm_files/
+negbin.stan
+negbin2.stan

@@ -1,0 +1,99 @@
+---
+title: "Simulate and fit negative binomial GLMs in Stan"
+author: "Sean Anderson"
+date: "October 19, 2014"
+output: html_document
+---
+
+```{r, message=FALSE, echo=FALSE}
+library(rstan)
+```
+
+Compile the model:
+
+```{r}
+model <- "
+// negative binomial parameterized as eta (log(mu)) and dispersion (phi)
+// see p286 in stan-reference-2.4.0.pdf
+// a basic GLM example
+data {
+  int<lower=1> N;    // rows of data
+  vector[N] x;       // predictor
+  int<lower=0> y[N]; // response
+}
+parameters {
+  real<lower=0> phi; // neg. binomial dispersion parameter
+  real b0;  // intercept
+  real b1;  // slope
+}
+model {
+  // priors:
+  phi ~ cauchy(0, 3);
+  b0 ~ normal(0, 5);
+  b1 ~ normal(0, 5);
+  // data model:
+  y ~ neg_binomial_2_log(b0 + b1 * x, phi);
+}
+"
+write(model, file = "negbin-glm.stan")
+```
+
+```{r, cache=TRUE}
+sm <- stan_model("negbin-glm.stan")
+```
+
+Simulate data: 
+
+```{r}
+set.seed(123)
+N <- 70
+phi <- 1.2
+b0 <- -0.5
+b1 <- 0.4
+x <- seq(1, 10, length.out = N)
+y <- rnbinom(N, size = phi, mu = exp(b0 + (x - mean(x)) * b1))
+plot(x, y)
+```
+
+Fit the model:
+
+```{r, results='hide'}
+m <- sampling(sm, data = list(N = N, y = y, x = x - mean(x)),
+  pars = c("b0", "b1", "phi"),
+  iter = 500, chains = 4)
+```
+
+```{r}
+m
+```
+
+Plot the output:
+
+```{r}
+rstan::traceplot(m, inc_warmup = FALSE)
+e <- extract(m, pars = c("b0", "b1", "phi"))
+true_pars <- c(b0 = b0, b1 = b1, phi = phi)
+x_cent <- x - mean(x)
+m_mass <- MASS::glm.nb(y ~ x_cent)
+coefs_mass <- c(coef(m_mass), summary(m_mass)$theta)
+par(mfrow = c(1, 3))
+for(i in 1:3) {
+  if(i %in% 1:2) {
+    plot(density(e[[i]]), main = names(true_pars)[i])
+  } else {
+    plot(density(e[[i]]), main = names(true_pars)[i], log = "x")
+  }
+  abline(v = true_pars[i], lwd = 2, col = "grey", lty = 2)
+  abline(v = coefs_mass[i], lwd = 3, col = "red")
+}
+legend("topright", legend = c("posterior", "true", "MASS::glm.nb"),
+  col = c("black", "grey", "red"), lty = c(1, 2, 1), lwd = c(1, 1.3, 3),
+  bty = "n")
+```
+
+```{r}
+plot(x, y)
+for(i in seq_along(e[[1]])) {
+  lines(x, exp(e[[1]][i] + e[[2]][i] * (x - mean(x))), col = "#00000008")
+}
+```
