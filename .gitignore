@@ -6,3 +6,4 @@ negbin-glm_cache/
 negbin-glm_files/
 negbin.stan
 negbin2.stan
+cache/
